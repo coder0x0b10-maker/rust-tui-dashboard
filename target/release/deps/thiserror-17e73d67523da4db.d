@@ -1,0 +1,14 @@
+/home/moltrpi5/clawd/projects/rust-tui-dashboard/target/release/deps/thiserror-17e73d67523da4db.d: /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /home/moltrpi5/clawd/projects/rust-tui-dashboard/target/release/build/thiserror-4dc8da37555db2ac/out/private.rs
+
+/home/moltrpi5/clawd/projects/rust-tui-dashboard/target/release/deps/libthiserror-17e73d67523da4db.rlib: /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /home/moltrpi5/clawd/projects/rust-tui-dashboard/target/release/build/thiserror-4dc8da37555db2ac/out/private.rs
+
+/home/moltrpi5/clawd/projects/rust-tui-dashboard/target/release/deps/libthiserror-17e73d67523da4db.rmeta: /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /home/moltrpi5/clawd/projects/rust-tui-dashboard/target/release/build/thiserror-4dc8da37555db2ac/out/private.rs
+
+/home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs:
+/home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs:
+/home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs:
+/home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs:
+/home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs:
+/home/moltrpi5/clawd/projects/rust-tui-dashboard/target/release/build/thiserror-4dc8da37555db2ac/out/private.rs:
+
+# env-dep:OUT_DIR=/home/moltrpi5/clawd/projects/rust-tui-dashboard/target/release/build/thiserror-4dc8da37555db2ac/out

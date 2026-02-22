@@ -1,0 +1,10 @@
+[package]
+name = "rust-tui-dashboard"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+crossterm = "0.29.0"
+ratatui = "0.30.0"
+tokio = { version = "1.49.0", features = ["full"] }
+yahoo_finance_api = "4.1.0"
