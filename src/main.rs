@@ -14,6 +14,17 @@ use time::OffsetDateTime;
 #[derive(Serialize, Deserialize, Clone)]
 struct Config {
     tickers: Vec<String>,
+    #[serde(default)]
+    holdings: HashMap<String, f64>, // symbol -> shares owned
+}
+
+#[derive(Clone)]
+struct PortfolioSummary {
+    total_value: f64,
+    daily_pnl: f64,
+    daily_pnl_pct: f64,
+    best_performer: String,
+    worst_performer: String,
 }
 
 #[derive(Clone)]
@@ -74,13 +85,17 @@ struct AppState {
     breakers: HashMap<String, CircuitBreaker>,
     last_refresh: Instant,
     status_msg: String,
+    portfolio: Option<PortfolioSummary>,
 }
 
 impl AppState {
     fn load_config() -> Config {
         match fs::read_to_string("config.json") {
-            Ok(content) => serde_json::from_str(&content).unwrap_or(Config { tickers: vec![] }),
-            Err(_) => Config { tickers: vec!["TSLA".to_string(), "AAPL".to_string()] },
+            Ok(content) => serde_json::from_str(&content).unwrap_or(Config { tickers: vec![], holdings: HashMap::new() }),
+            Err(_) => Config {
+                tickers: vec!["TSLA".to_string(), "AAPL".to_string()],
+                holdings: HashMap::new(),
+            },
         }
     }
 
@@ -221,11 +236,49 @@ async fn fetch_all_quotes_batch(
     });
 
     let status = format!(
-        " v0.5 | Fetched: {} | Cached: {} | Skipped: {} | Total: {} ",
+        " v0.6 | Fetched: {} | Cached: {} | Skipped: {} | Total: {} ",
         fetched, cached, skipped, results.len()
     );
 
     (results, status)
+}
+
+/// v0.6: Calculate portfolio summary from quotes and holdings
+fn calculate_portfolio(quotes: &[StockQuote], holdings: &HashMap<String, f64>) -> Option<PortfolioSummary> {
+    if quotes.is_empty() {
+        return None;
+    }
+
+    let mut total_value = 0.0;
+    let mut daily_pnl = 0.0;
+    let mut best: Option<(&str, f64)> = None;
+    let mut worst: Option<(&str, f64)> = None;
+
+    for q in quotes {
+        let shares = holdings.get(&q.symbol).copied().unwrap_or(0.0);
+        total_value += q.price * shares;
+        daily_pnl += q.change * shares;
+
+        match &best {
+            Some((_, pct)) if q.change_pct <= *pct => {}
+            _ => best = Some((&q.symbol, q.change_pct)),
+        }
+        match &worst {
+            Some((_, pct)) if q.change_pct >= *pct => {}
+            _ => worst = Some((&q.symbol, q.change_pct)),
+        }
+    }
+
+    let prev_value = total_value - daily_pnl;
+    let daily_pnl_pct = if prev_value != 0.0 { (daily_pnl / prev_value) * 100.0 } else { 0.0 };
+
+    Some(PortfolioSummary {
+        total_value,
+        daily_pnl,
+        daily_pnl_pct,
+        best_performer: best.map(|(s, p)| format!("{} ({:+.2}%)", s, p)).unwrap_or_default(),
+        worst_performer: worst.map(|(s, p)| format!("{} ({:+.2}%)", s, p)).unwrap_or_default(),
+    })
 }
 
 #[tokio::main]
@@ -246,6 +299,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         breakers: HashMap::new(),
         last_refresh: Instant::now(),
         status_msg: String::from(" Loading..."),
+        portfolio: None,
     };
 
     let (quotes, status) = fetch_all_quotes_batch(
@@ -255,6 +309,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     ).await;
     app_state.quotes = quotes;
     app_state.status_msg = status;
+    app_state.portfolio = calculate_portfolio(&app_state.quotes, &app_state.config.holdings);
 
     let auto_refresh_interval = Duration::from_secs(60);
 
@@ -268,6 +323,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             ).await;
             app_state.quotes = quotes;
             app_state.status_msg = status;
+            app_state.portfolio = calculate_portfolio(&app_state.quotes, &app_state.config.holdings);
             app_state.last_refresh = Instant::now();
         }
 
@@ -276,16 +332,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(3),
+                    Constraint::Length(5),
                     Constraint::Min(5),
                     Constraint::Length(3),
                     Constraint::Length(1),
                 ])
                 .split(f.area());
 
-            let title = Paragraph::new("Rust TUI Investment Dashboard (v0.5)")
+            let title = Paragraph::new("Rust TUI Investment Dashboard (v0.6)")
                 .block(Block::default().borders(Borders::ALL))
                 .style(Style::default().fg(Color::Cyan));
             f.render_widget(title, chunks[0]);
+
+            // Portfolio Summary Panel
+            let portfolio_text = match &app_state.portfolio {
+                Some(p) => {
+                    let pnl_color = if p.daily_pnl >= 0.0 { "+" } else { "" };
+                    format!(
+                        " 💰 Portfolio: ${:.2}  |  📈 Daily P&L: {}${:.2} ({}{:.2}%)  |  🏆 Best: {}  |  📉 Worst: {}",
+                        p.total_value, pnl_color, p.daily_pnl, pnl_color, p.daily_pnl_pct,
+                        p.best_performer, p.worst_performer
+                    )
+                }
+                None => " 💰 Portfolio: No holdings configured. Edit config.json to add holdings.".to_string(),
+            };
+            let portfolio_panel = Paragraph::new(portfolio_text)
+                .block(Block::default().title(" Portfolio Summary ").borders(Borders::ALL))
+                .style(Style::default().fg(Color::Yellow));
+            f.render_widget(portfolio_panel, chunks[1]);
 
             let header_cells = ["TICKER", "PRICE", "CHANGE", "% CHANGE"]
                 .iter()
@@ -319,10 +393,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .header(header)
             .block(Block::default().title(" Market Watch ").borders(Borders::ALL));
 
-            f.render_widget(table, chunks[1]);
+            f.render_widget(table, chunks[2]);
 
             let input_hint = match app_state.input_mode {
-                InputMode::Normal => " [a] Add  [d] Delete  [r] Refresh  [q] Quit ",
+                InputMode::Normal => " [a] Add  [d] Delete  [r] Refresh  [h] Holdings  [q] Quit ",
                 InputMode::Editing => " Enter Ticker and Press Enter (Esc to Cancel) ",
             };
 
@@ -332,12 +406,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     InputMode::Editing => Style::default().fg(Color::Yellow),
                     _ => Style::default(),
                 });
-            f.render_widget(input_box, chunks[2]);
+            f.render_widget(input_box, chunks[3]);
 
             // Status bar
             let status_bar = Paragraph::new(app_state.status_msg.as_str())
                 .style(Style::default().fg(Color::DarkGray));
-            f.render_widget(status_bar, chunks[3]);
+            f.render_widget(status_bar, chunks[4]);
         })?;
 
         if event::poll(Duration::from_millis(100))? {
@@ -365,6 +439,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             ).await;
                             app_state.quotes = quotes;
                             app_state.status_msg = status;
+                            app_state.portfolio = calculate_portfolio(&app_state.quotes, &app_state.config.holdings);
                             app_state.last_refresh = Instant::now();
                         }
                         _ => {}
