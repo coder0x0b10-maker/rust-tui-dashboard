@@ -1,5 +1,10 @@
 use std::{io, time::Duration, error::Error, fs};
-use ratatui::{Terminal, backend::CrosstermBackend, widgets::{Block, Borders, Paragraph}, layout::{Layout, Constraint, Direction}, style::{Style, Color}};
+use ratatui::{
+    Terminal, backend::CrosstermBackend,
+    widgets::{Block, Borders, Paragraph, Table, Row, Cell},
+    layout::{Layout, Constraint, Direction},
+    style::{Style, Color, Modifier}
+};
 use crossterm::{execute, terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen}, event::{self, Event, KeyCode}};
 use yahoo_finance_api as yahoo;
 use serde::{Serialize, Deserialize};
@@ -49,20 +54,34 @@ async fn fetch_all_quotes(tickers: &[String]) -> Vec<StockQuote> {
     let mut results = Vec::new();
 
     for symbol in tickers {
+        // 抓取最近 5 天的數據確保能拿到昨日收盤
+        if let Ok(response) = provider.get_quote_history(symbol, Duration::from_secs(86400 * 5)).await {
+            if let Ok(quotes) = response.quotes() {
+                if quotes.len() >= 2 {
+                    let last = quotes.last().unwrap();
+                    let prev = quotes[quotes.len() - 2].close;
+                    let price = last.close;
+                    let change = price - prev;
+                    let change_pct = if prev != 0.0 { (change / prev) * 100.0 } else { 0.0 };
+
+                    results.push(StockQuote {
+                        symbol: symbol.clone(),
+                        price,
+                        change,
+                        change_pct,
+                    });
+                    continue;
+                }
+            }
+        }
+        // Fallback to latest quote if history fails
         if let Ok(response) = provider.get_latest_quotes(symbol, "1d").await {
             if let Ok(quote) = response.last_quote() {
-                // 簡單計算漲跌 (目前的價格 vs 前一根 K 線的收盤價，這裡簡化處理)
-                // 正確做法應抓取 interval="1d" 的前一日收盤，此處先實作結構
-                let price = quote.close;
-                let open = quote.open;
-                let change = price - open;
-                let change_pct = if open != 0.0 { (change / open) * 100.0 } else { 0.0 };
-
                 results.push(StockQuote {
                     symbol: symbol.clone(),
-                    price,
-                    change,
-                    change_pct,
+                    price: quote.close,
+                    change: 0.0,
+                    change_pct: 0.0,
                 });
             }
         }
@@ -94,30 +113,49 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(3), // Title
-                    Constraint::Min(5),    // Content
+                    Constraint::Min(5),    // Content (Table)
                     Constraint::Length(3), // Input
                 ].as_ref())
                 .split(f.area());
 
-            let title = Paragraph::new("Rust TUI Investment Dashboard (v0.3)")
+            let title = Paragraph::new("Rust TUI Investment Dashboard (v0.4)")
                 .block(Block::default().borders(Borders::ALL));
             f.render_widget(title, chunks[0]);
 
-            // 建立多欄對齊的文字
-            let mut display_text = format!("{:<12} {:>12} {:>12} {:>12}\n", "TICKER", "PRICE", "CHANGE", "% CHANGE");
-            display_text.push_str(&"-".repeat(52));
-            display_text.push('\n');
+            // 使用 Table Widget 進行渲染
+            let header_cells = ["TICKER", "PRICE", "CHANGE", "% CHANGE"]
+                .iter()
+                .map(|h| Cell::from(*h).style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Cyan)));
+            let header = Row::new(header_cells).height(1).bottom_margin(1);
 
-            for q in &app_state.quotes {
-                display_text.push_str(&format!(
-                    "{:<12} {:>12.2} {:>12.2} {:>11.2}%\n",
-                    q.symbol, q.price, q.change, q.change_pct
-                ));
-            }
+            let rows = app_state.quotes.iter().map(|q| {
+                let color = if q.change > 0.0 {
+                    Color::Red // 漲紅
+                } else if q.change < 0.0 {
+                    Color::Green // 跌綠
+                } else {
+                    Color::White
+                };
 
-            let content = Paragraph::new(display_text)
-                .block(Block::default().title("Market Watch").borders(Borders::ALL));
-            f.render_widget(content, chunks[1]);
+                let cells = vec![
+                    Cell::from(q.symbol.clone()),
+                    Cell::from(format!("{:.2}", q.price)),
+                    Cell::from(format!("{:.2}", q.change)).style(Style::default().fg(color)),
+                    Cell::from(format!("{:.2}%", q.change_pct)).style(Style::default().fg(color)),
+                ];
+                Row::new(cells)
+            });
+
+            let table = Table::new(rows, [
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+            ])
+            .header(header)
+            .block(Block::default().title(" Market Watch ").borders(Borders::ALL));
+
+            f.render_widget(table, chunks[1]);
 
             let input_hint = match app_state.input_mode {
                 InputMode::Normal => " [a] Add  [r] Refresh  [q] Quit ",
