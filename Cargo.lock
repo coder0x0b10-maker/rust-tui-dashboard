@@ -1559,6 +1559,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "time",
  "tokio",
  "yahoo_finance_api",
 ]

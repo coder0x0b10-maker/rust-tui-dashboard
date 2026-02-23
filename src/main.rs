@@ -8,6 +8,7 @@ use ratatui::{
 use crossterm::{execute, terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen}, event::{self, Event, KeyCode}};
 use yahoo_finance_api as yahoo;
 use serde::{Serialize, Deserialize};
+use time::OffsetDateTime;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Config {
@@ -52,10 +53,11 @@ impl AppState {
 async fn fetch_all_quotes(tickers: &[String]) -> Vec<StockQuote> {
     let provider = yahoo::YahooConnector::new().unwrap();
     let mut results = Vec::new();
+    let now = OffsetDateTime::now_utc();
+    let start = now - Duration::from_secs(86400 * 5); // 抓 5 天內數據
 
     for symbol in tickers {
-        // 抓取最近 5 天的數據確保能拿到昨日收盤
-        if let Ok(response) = provider.get_quote_history(symbol, Duration::from_secs(86400 * 5)).await {
+        if let Ok(response) = provider.get_quote_history(symbol, start, now).await {
             if let Ok(quotes) = response.quotes() {
                 if quotes.len() >= 2 {
                     let last = quotes.last().unwrap();
@@ -74,7 +76,6 @@ async fn fetch_all_quotes(tickers: &[String]) -> Vec<StockQuote> {
                 }
             }
         }
-        // Fallback to latest quote if history fails
         if let Ok(response) = provider.get_latest_quotes(symbol, "1d").await {
             if let Ok(quote) = response.last_quote() {
                 results.push(StockQuote {
@@ -112,17 +113,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3), // Title
-                    Constraint::Min(5),    // Content (Table)
-                    Constraint::Length(3), // Input
-                ].as_ref())
+                    Constraint::Length(3),
+                    Constraint::Min(5),
+                    Constraint::Length(3),
+                ])
                 .split(f.area());
 
-            let title = Paragraph::new("Rust TUI Investment Dashboard (v0.4)")
+            let title = Paragraph::new("Rust TUI Investment Dashboard (v0.4.2)")
                 .block(Block::default().borders(Borders::ALL));
             f.render_widget(title, chunks[0]);
 
-            // 使用 Table Widget 進行渲染
             let header_cells = ["TICKER", "PRICE", "CHANGE", "% CHANGE"]
                 .iter()
                 .map(|h| Cell::from(*h).style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Cyan)));
@@ -130,9 +130,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             let rows = app_state.quotes.iter().map(|q| {
                 let color = if q.change > 0.0 {
-                    Color::Red // 漲紅
+                    Color::Red
                 } else if q.change < 0.0 {
-                    Color::Green // 跌綠
+                    Color::Green
                 } else {
                     Color::White
                 };
