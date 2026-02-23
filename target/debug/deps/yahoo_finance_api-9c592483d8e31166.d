@@ -1,9 +1,0 @@
-/home/moltrpi5/clawd/projects/rust-tui-dashboard/target/debug/deps/yahoo_finance_api-9c592483d8e31166.d: /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yahoo_finance_api-4.1.0/src/lib.rs /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yahoo_finance_api-4.1.0/src/quotes.rs /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yahoo_finance_api-4.1.0/src/search_result.rs /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yahoo_finance_api-4.1.0/src/yahoo_error.rs /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yahoo_finance_api-4.1.0/src/async_impl.rs
-
-/home/moltrpi5/clawd/projects/rust-tui-dashboard/target/debug/deps/libyahoo_finance_api-9c592483d8e31166.rmeta: /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yahoo_finance_api-4.1.0/src/lib.rs /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yahoo_finance_api-4.1.0/src/quotes.rs /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yahoo_finance_api-4.1.0/src/search_result.rs /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yahoo_finance_api-4.1.0/src/yahoo_error.rs /home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yahoo_finance_api-4.1.0/src/async_impl.rs
-
-/home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yahoo_finance_api-4.1.0/src/lib.rs:
-/home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yahoo_finance_api-4.1.0/src/quotes.rs:
-/home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yahoo_finance_api-4.1.0/src/search_result.rs:
-/home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yahoo_finance_api-4.1.0/src/yahoo_error.rs:
-/home/moltrpi5/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/yahoo_finance_api-4.1.0/src/async_impl.rs:
