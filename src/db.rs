@@ -3,7 +3,7 @@ use rusqlite::{params, Connection};
 use rust_decimal::Decimal;
 use std::str::FromStr;
 use uuid::Uuid;
-use chrono::{Utc, NaiveDate};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 // === Data Models ===
@@ -317,7 +317,9 @@ impl Database {
     // === Holdings Calculation ===
 
     pub fn calculate_holdings(&self, portfolio_id: &str) -> Result<Vec<Holding>> {
-        let transactions = self.get_transactions(portfolio_id)?;
+        let mut transactions = self.get_transactions(portfolio_id)?;
+        // Sort by date ascending for sequential calculation
+        transactions.sort_by(|a, b| a.date.cmp(&b.date));
         
         // Group by symbol and calculate holdings
         let mut holdings_map: std::collections::HashMap<String, Holding> = std::collections::HashMap::new();
@@ -353,10 +355,8 @@ impl Database {
                     entry.total_cost -= cost_basis;
                     entry.total_shares -= tx.shares;
                     
-                    // Update average cost (may change if different cost basis shares sold)
-                    if entry.total_shares > Decimal::ZERO {
-                        entry.avg_cost = entry.total_cost / entry.total_shares;
-                    } else {
+                    // Do NOT update average cost on Sell, it remains the same
+                    if entry.total_shares <= Decimal::ZERO {
                         entry.avg_cost = Decimal::ZERO;
                         entry.total_cost = Decimal::ZERO;
                     }
@@ -396,5 +396,123 @@ impl Database {
         )?;
         
         Ok(self.get_portfolio_by_id(&id)?.unwrap())
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+    use tempfile::NamedTempFile;
+
+    fn setup_test_db() -> (Database, NamedTempFile) {
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path().to_str().unwrap();
+        (Database::new(path).unwrap(), temp_file)
+    }
+
+    #[test]
+    fn test_portfolio_crud() {
+        let (db, _file) = setup_test_db();
+        
+        // Add
+        let id = db.add_portfolio("Test Portfolio", "{}").unwrap();
+        
+        // Get
+        let p = db.get_portfolio_by_id(&id).unwrap().expect("Portfolio should exist");
+        assert_eq!(p.name, "Test Portfolio");
+        
+        // List
+        let all = db.get_all_portfolios().unwrap();
+        assert_eq!(all.len(), 1);
+        
+        // Update
+        db.update_portfolio(&id, "Updated Name", "{\"stock\": 100}").unwrap();
+        let p_updated = db.get_portfolio_by_id(&id).unwrap().unwrap();
+        assert_eq!(p_updated.name, "Updated Name");
+        assert_eq!(p_updated.target_allocations, "{\"stock\": 100}");
+        
+        // Delete
+        db.delete_portfolio(&id).unwrap();
+        let p_deleted = db.get_portfolio_by_id(&id).unwrap();
+        assert!(p_deleted.is_none());
+    }
+
+    #[test]
+    fn test_transaction_crud() {
+        let (db, _file) = setup_test_db();
+        let p_id = db.add_portfolio("Test", "{}").unwrap();
+        
+        // Add
+        let tx_id = db.add_transaction(
+            &p_id, "AAPL", Some("Apple"), "2023-01-01", 
+            dec!(150.0), dec!(10.0), dec!(1.0), "Buy", "USD"
+        ).unwrap();
+        
+        // Get
+        let tx = db.get_transaction_by_id(&tx_id).unwrap().expect("Transaction should exist");
+        assert_eq!(tx.symbol, "AAPL");
+        assert_eq!(tx.price, dec!(150.0));
+        
+        // List
+        let all = db.get_transactions(&p_id).unwrap();
+        assert_eq!(all.len(), 1);
+        
+        // Update
+        db.update_transaction(
+            &tx_id, "AAPL", Some("Apple Inc"), "2023-01-02", 
+            dec!(155.0), dec!(10.0), dec!(2.0), "Buy", "USD"
+        ).unwrap();
+        let tx_updated = db.get_transaction_by_id(&tx_id).unwrap().unwrap();
+        assert_eq!(tx_updated.price, dec!(155.0));
+        assert_eq!(tx_updated.fee, dec!(2.0));
+        assert_eq!(tx_updated.date, "2023-01-02");
+        
+        // Delete
+        db.delete_transaction(&tx_id).unwrap();
+        let tx_deleted = db.get_transaction_by_id(&tx_id).unwrap();
+        assert!(tx_deleted.is_none());
+    }
+
+    #[test]
+    fn test_holdings_calculation() {
+        let (db, _file) = setup_test_db();
+        let p_id = db.add_portfolio("Test", "{}").unwrap();
+        
+        // Buy 10 AAPL at $100, fee $10
+        db.add_transaction(
+            &p_id, "AAPL", None, "2023-01-01", 
+            dec!(100.0), dec!(10.0), dec!(10.0), "Buy", "USD"
+        ).unwrap();
+        
+        // Holdings should be 10 shares, avg cost $101.0
+        let holdings = db.calculate_holdings(&p_id).unwrap();
+        assert_eq!(holdings.len(), 1);
+        assert_eq!(holdings[0].symbol, "AAPL");
+        assert_eq!(holdings[0].total_shares, dec!(10.0));
+        assert_eq!(holdings[0].avg_cost, dec!(101.0)); // (1000 + 10) / 10
+        
+        // Buy 10 more AAPL at $120, fee $10
+        db.add_transaction(
+            &p_id, "AAPL", None, "2023-01-02", 
+            dec!(120.0), dec!(10.0), dec!(10.0), "Buy", "USD"
+        ).unwrap();
+        
+        // Holdings: 20 shares, total cost 1010 + 1210 = 2220, avg cost $111.0
+        let holdings = db.calculate_holdings(&p_id).unwrap();
+        assert_eq!(holdings[0].total_shares, dec!(20.0));
+        assert_eq!(holdings[0].avg_cost, dec!(111.0));
+        
+        // Sell 5 AAPL at $150, fee $5
+        db.add_transaction(
+            &p_id, "AAPL", None, "2023-01-03", 
+            dec!(150.0), dec!(5.0), dec!(5.0), "Sell", "USD"
+        ).unwrap();
+        
+        // Realized gain: (150*5 - 5) - (111*5) = 745 - 555 = 190
+        // Remaining: 15 shares, total cost 2220 - 555 = 1665, avg cost $111.0
+        let holdings = db.calculate_holdings(&p_id).unwrap();
+        assert_eq!(holdings[0].total_shares, dec!(15.0));
+        assert_eq!(holdings[0].realized_gain, dec!(190.0));
+        assert_eq!(holdings[0].avg_cost, dec!(111.0));
     }
 }

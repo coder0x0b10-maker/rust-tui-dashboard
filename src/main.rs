@@ -21,7 +21,6 @@ use ratatui::{
     Terminal,
 };
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use yahoo_finance_api as yahoo;
 
@@ -394,7 +393,7 @@ fn calculate_portfolio_summary(holdings: &[Holding], quotes: &HashMap<String, St
             .unwrap_or_else(|| h.avg_cost.to_string().parse().unwrap_or(0.0));
         
         let shares: f64 = h.total_shares.to_string().parse().unwrap_or(0.0);
-        let avg_cost: f64 = h.avg_cost.to_string().parse().unwrap_or(0.0);
+        let _avg_cost: f64 = h.avg_cost.to_string().parse().unwrap_or(0.0);
         
         total_value += current_price * shares;
         
