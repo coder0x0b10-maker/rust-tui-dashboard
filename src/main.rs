@@ -91,6 +91,17 @@ enum ViewMode {
     AddTransaction,
     PortfolioSelect,
     TransactionLog,
+    Rebalance,
+}
+
+#[derive(Clone, Debug)]
+struct RebalanceAdvice {
+    symbol: String,
+    current_pct: f64,
+    target_pct: f64,
+    diff_pct: f64,
+    action: String,
+    amount: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -130,6 +141,7 @@ struct AppState {
     
     // Portfolio
     portfolio_summary: Option<PortfolioSummary>,
+    rebalance_advices: Vec<RebalanceAdvice>,
 }
 
 impl AppState {
@@ -164,7 +176,39 @@ impl AppState {
             input_fields,
             input_field: TransactionField::Symbol,
             portfolio_summary: None,
+            rebalance_advices: Vec::new(),
         })
+    }
+
+
+    fn calculate_rebalance(&mut self) {
+        let target_allocs: std::collections::HashMap<String, f64> = serde_json::from_str(&self.current_portfolio.target_allocations).unwrap_or_default();
+        if target_allocs.is_empty() {
+            self.error_msg = Some("Target allocations not set for this portfolio.".to_string());
+            return;
+        }
+        let total_value = self.portfolio_summary.as_ref().map(|s| s.total_value).unwrap_or(0.0);
+        if total_value <= 0.0 {
+            self.error_msg = Some("Portfolio has no market value.".to_string());
+            return;
+        }
+        let mut advices = Vec::new();
+        for (symbol, target_pct) in target_allocs {
+            let current_value = self.holdings.iter().filter(|h| h.symbol == symbol).map(|h| {
+                let price = self.quotes.get(&h.symbol).map(|q| q.price).unwrap_or(0.0);
+                let shares: f64 = h.total_shares.to_string().parse().unwrap_or(0.0);
+                price * shares
+            }).sum::<f64>();
+            let current_pct = if total_value > 0.0 { (current_value / total_value) * 100.0 } else { 0.0 };
+            let diff_pct = target_pct - current_pct;
+            let amount = (diff_pct / 100.0) * total_value;
+            let action = if diff_pct > 1.0 { "Buy".to_string() } else if diff_pct < -1.0 { "Sell".to_string() } else { "Hold".to_string() };
+            advices.push(RebalanceAdvice { symbol, current_pct, target_pct, diff_pct, action, amount: amount.abs() });
+        }
+        advices.sort_by(|a, b| b.diff_pct.abs().partial_cmp(&a.diff_pct.abs()).unwrap());
+        self.rebalance_advices = advices;
+        self.view_mode = ViewMode::Rebalance;
+        self.selected_index = 0;
     }
 
     fn refresh_holdings(&mut self) {
@@ -466,6 +510,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 ViewMode::AddTransaction => render_add_transaction(&mut app_state, f),
                 ViewMode::PortfolioSelect => render_portfolio_select(&mut app_state, f),
                 ViewMode::TransactionLog => render_transaction_log(&mut app_state, f),
+                ViewMode::Rebalance => render_rebalance(&mut app_state, f),
             }
         })?;
 
@@ -573,7 +618,7 @@ fn render_dashboard(app_state: &mut AppState, f: &mut ratatui::Frame) {
 
     // Hint bar
     let hint = Paragraph::new(
-        " [P]ortfolio [L]ogs [A]dd [R]efresh [D]elete Holdings [Q]uit"
+        " [P]ortfolio [L]ogs [A]dd [R]efresh [B]alance [D]elete Holdings [Q]uit"
     )
     .block(Block::default().borders(Borders::ALL))
     .style(Style::default().fg(Color::DarkGray));
@@ -762,6 +807,40 @@ fn render_transaction_log(app_state: &mut AppState, f: &mut ratatui::Frame) {
     f.render_widget(hint, chunks[2]);
 }
 
+
+fn render_rebalance(app_state: &mut AppState, f: &mut ratatui::Frame) {
+    let chunks = ratatui::layout::Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints([ratatui::layout::Constraint::Length(3), ratatui::layout::Constraint::Min(10), ratatui::layout::Constraint::Length(3)])
+        .split(f.area());
+    let title = ratatui::widgets::Paragraph::new(format!("⚖️ Rebalance Advices - {} [Esc to Back]", app_state.current_portfolio.name))
+        .block(ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL))
+        .style(ratatui::style::Style::default().fg(ratatui::style::Color::Cyan));
+    f.render_widget(title, chunks[0]);
+    let header_cells = ["Symbol", "Target %", "Current %", "Diff %", "Action", "Amount"].iter()
+        .map(|h| ratatui::widgets::Cell::from(*h).style(ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD).fg(ratatui::style::Color::Cyan)));
+    let header = ratatui::widgets::Row::new(header_cells).height(1).bottom_margin(1);
+    let rows: Vec<ratatui::widgets::Row> = app_state.rebalance_advices.iter().enumerate().map(|(i, r)| {
+        let is_selected = i == app_state.selected_index;
+        let color = match r.action.as_str() { "Buy" => ratatui::style::Color::Green, "Sell" => ratatui::style::Color::Red, _ => ratatui::style::Color::White };
+        let row = ratatui::widgets::Row::new(vec![
+            ratatui::widgets::Cell::from(r.symbol.clone()),
+            ratatui::widgets::Cell::from(format!("{:.2}%", r.target_pct)),
+            ratatui::widgets::Cell::from(format!("{:.2}%", r.current_pct)),
+            ratatui::widgets::Cell::from(format!("{:+.2}%", r.diff_pct)).style(ratatui::style::Style::default().fg(color)),
+            ratatui::widgets::Cell::from(r.action.clone()).style(ratatui::style::Style::default().fg(color).add_modifier(ratatui::style::Modifier::BOLD)),
+            ratatui::widgets::Cell::from(format!("${:.2}", r.amount)),
+        ]);
+        if is_selected { row.style(ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED).fg(ratatui::style::Color::Yellow)) } else { row }
+    }).collect();
+    let table = ratatui::widgets::Table::new(rows, [ratatui::layout::Constraint::Percentage(20), ratatui::layout::Constraint::Percentage(15), ratatui::layout::Constraint::Percentage(15), ratatui::layout::Constraint::Percentage(15), ratatui::layout::Constraint::Percentage(15), ratatui::layout::Constraint::Percentage(20)])
+        .header(header)
+        .block(ratatui::widgets::Block::default().title(" Advices ").borders(ratatui::widgets::Borders::ALL));
+    f.render_widget(table, chunks[1]);
+    let hint = ratatui::widgets::Paragraph::new(" [↑/↓] Navigate [Esc] Back ").style(ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray));
+    f.render_widget(hint, chunks[2]);
+}
+
 async fn handle_key_event(app_state: &mut AppState, code: KeyCode, _modifiers: KeyModifiers) {
     // Clear error on any key press
     app_state.error_msg = None;
@@ -780,6 +859,9 @@ async fn handle_key_event(app_state: &mut AppState, code: KeyCode, _modifiers: K
                 KeyCode::Char('l') => {
                     app_state.view_mode = ViewMode::TransactionLog;
                     app_state.selected_index = 0;
+                }
+                KeyCode::Char('b') => {
+                    app_state.calculate_rebalance();
                 }
                 KeyCode::Char('r') => {
                     let symbols: Vec<String> = app_state.holdings.iter().map(|h| h.symbol.clone()).collect();
@@ -906,6 +988,20 @@ async fn handle_key_event(app_state: &mut AppState, code: KeyCode, _modifiers: K
                 }
                 KeyCode::Char('d') | KeyCode::Char('D') => {
                     app_state.delete_selected_transaction();
+                }
+                _ => {}
+            }
+        }
+        ViewMode::Rebalance => {
+            match code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                    app_state.view_mode = ViewMode::Dashboard;
+                }
+                KeyCode::Up => {
+                    if app_state.selected_index > 0 { app_state.selected_index -= 1; }
+                }
+                KeyCode::Down => {
+                    if app_state.selected_index < app_state.rebalance_advices.len().saturating_sub(1) { app_state.selected_index += 1; }
                 }
                 _ => {}
             }
