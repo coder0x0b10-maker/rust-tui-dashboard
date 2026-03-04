@@ -3,8 +3,9 @@ mod db;
 use std::{
     collections::HashMap,
     error::Error,
+    fs,
     io,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use anyhow::Result;
@@ -21,10 +22,53 @@ use ratatui::{
     Terminal,
 };
 use rust_decimal::Decimal;
+use serde::Deserialize;
 use time::OffsetDateTime;
 use yahoo_finance_api as yahoo;
 
 use db::{Database, Holding, Portfolio, Transaction};
+
+// === Config Structures ===
+
+#[derive(Debug, Deserialize, Clone)]
+struct Config {
+    tickers: Vec<String>,
+}
+
+struct ConfigWatcher {
+    path: String,
+    last_modified: Option<SystemTime>,
+    config: Option<Config>,
+}
+
+impl ConfigWatcher {
+    fn new(path: &str) -> Self {
+        Self {
+            path: path.to_string(),
+            last_modified: None,
+            config: None,
+        }
+    }
+
+    fn check_and_load(&mut self) -> bool {
+        let metadata = match fs::metadata(&self.path) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+
+        let modified = metadata.modified().ok();
+        if modified != self.last_modified {
+            self.last_modified = modified;
+            if let Ok(content) = fs::read_to_string(&self.path) {
+                if let Ok(config) = serde_json::from_str::<Config>(&content) {
+                    self.config = Some(config);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
 
 // === Data Structures ===
 
@@ -92,6 +136,7 @@ enum ViewMode {
     PortfolioSelect,
     TransactionLog,
     Rebalance,
+    TransactionFilter,
 }
 
 #[derive(Clone, Debug)]
@@ -111,6 +156,7 @@ enum TransactionField {
     Price,
     Fee,
     Type,
+    Filter,
 }
 
 // === App State ===
@@ -128,12 +174,14 @@ struct AppState {
     selected_index: usize,
     status_msg: String,
     error_msg: Option<String>,
+    should_redraw: bool,
     
     // Price Data
     quotes: HashMap<String, StockQuote>,
     cache: HashMap<String, StockQuote>,
     breakers: HashMap<String, CircuitBreaker>,
     last_refresh: Instant,
+    config_watcher: ConfigWatcher,
     
     // Input State
     input_fields: HashMap<String, String>,
@@ -151,6 +199,7 @@ impl AppState {
         let all_portfolios = db.get_all_portfolios()?;
         let holdings = db.calculate_holdings(&current_portfolio.id)?;
         let transactions = db.get_transactions(&current_portfolio.id)?;
+        let config_watcher = ConfigWatcher::new("config.json");
         
         let mut input_fields = HashMap::new();
         input_fields.insert("symbol".to_string(), String::new());
@@ -158,6 +207,7 @@ impl AppState {
         input_fields.insert("price".to_string(), String::new());
         input_fields.insert("fee".to_string(), "0".to_string());
         input_fields.insert("type".to_string(), "Buy".to_string());
+        input_fields.insert("filter".to_string(), String::new());
         
         Ok(Self {
             db,
@@ -169,15 +219,29 @@ impl AppState {
             selected_index: 0,
             status_msg: " Ready".to_string(),
             error_msg: None,
+            should_redraw: true,
             quotes: HashMap::new(),
             cache: HashMap::new(),
             breakers: HashMap::new(),
             last_refresh: Instant::now(),
+            config_watcher,
             input_fields,
             input_field: TransactionField::Symbol,
             portfolio_summary: None,
             rebalance_advices: Vec::new(),
         })
+    }
+
+    fn get_filtered_transactions(&self) -> Vec<Transaction> {
+        let filter = self.input_fields.get("filter").cloned().unwrap_or_default().to_uppercase();
+        if filter.is_empty() {
+            self.transactions.clone()
+        } else {
+            self.transactions.iter()
+                .filter(|tx| tx.symbol.to_uppercase().contains(&filter))
+                .cloned()
+                .collect()
+        }
     }
 
 
@@ -479,8 +543,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut app_state = AppState::new()?;
 
-    // Initial price fetch
-    let symbols: Vec<String> = app_state.holdings.iter().map(|h| h.symbol.clone()).collect();
+    // Initial price fetch and config load
+    app_state.config_watcher.check_and_load();
+    let mut symbols: Vec<String> = app_state.holdings.iter().map(|h| h.symbol.clone()).collect();
+    if let Some(config) = &app_state.config_watcher.config {
+        for ticker in &config.tickers {
+            if !symbols.contains(ticker) {
+                symbols.push(ticker.clone());
+            }
+        }
+    }
+
     if !symbols.is_empty() {
         let (quotes, status) = fetch_all_quotes(&symbols, &mut app_state.cache, &mut app_state.breakers).await;
         app_state.quotes = quotes;
@@ -488,35 +561,69 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     
     app_state.portfolio_summary = calculate_portfolio_summary(&app_state.holdings, &app_state.quotes);
+    app_state.should_redraw = true;
 
     let auto_refresh_interval = Duration::from_secs(60);
 
     loop {
-        // Auto-refresh prices
-        if app_state.last_refresh.elapsed() >= auto_refresh_interval {
-            let symbols: Vec<String> = app_state.holdings.iter().map(|h| h.symbol.clone()).collect();
+        // Hot-reload config
+        if app_state.config_watcher.check_and_load() {
+            app_state.status_msg = " Config reloaded".to_string();
+            app_state.should_redraw = true;
+            // Immediate refresh to get new ticker prices
+            let mut symbols: Vec<String> = app_state.holdings.iter().map(|h| h.symbol.clone()).collect();
+            if let Some(config) = &app_state.config_watcher.config {
+                for ticker in &config.tickers {
+                    if !symbols.contains(ticker) {
+                        symbols.push(ticker.clone());
+                    }
+                }
+            }
             if !symbols.is_empty() {
                 let (quotes, status) = fetch_all_quotes(&symbols, &mut app_state.cache, &mut app_state.breakers).await;
                 app_state.quotes = quotes;
                 app_state.status_msg = status;
                 app_state.portfolio_summary = calculate_portfolio_summary(&app_state.holdings, &app_state.quotes);
             }
+        }
+
+        // Auto-refresh prices
+        if app_state.last_refresh.elapsed() >= auto_refresh_interval {
+            let mut symbols: Vec<String> = app_state.holdings.iter().map(|h| h.symbol.clone()).collect();
+            if let Some(config) = &app_state.config_watcher.config {
+                for ticker in &config.tickers {
+                    if !symbols.contains(ticker) {
+                        symbols.push(ticker.clone());
+                    }
+                }
+            }
+            if !symbols.is_empty() {
+                let (quotes, status) = fetch_all_quotes(&symbols, &mut app_state.cache, &mut app_state.breakers).await;
+                app_state.quotes = quotes;
+                app_state.status_msg = status;
+                app_state.portfolio_summary = calculate_portfolio_summary(&app_state.holdings, &app_state.quotes);
+                app_state.should_redraw = true;
+            }
             app_state.last_refresh = Instant::now();
         }
 
-        terminal.draw(|f| {
-            match app_state.view_mode {
-                ViewMode::Dashboard => render_dashboard(&mut app_state, f),
-                ViewMode::AddTransaction => render_add_transaction(&mut app_state, f),
-                ViewMode::PortfolioSelect => render_portfolio_select(&mut app_state, f),
-                ViewMode::TransactionLog => render_transaction_log(&mut app_state, f),
-                ViewMode::Rebalance => render_rebalance(&mut app_state, f),
-            }
-        })?;
+        if app_state.should_redraw {
+            terminal.draw(|f| {
+                match app_state.view_mode {
+                    ViewMode::Dashboard => render_dashboard(&mut app_state, f),
+                    ViewMode::AddTransaction => render_add_transaction(&mut app_state, f),
+                    ViewMode::PortfolioSelect => render_portfolio_select(&mut app_state, f),
+                    ViewMode::TransactionLog | ViewMode::TransactionFilter => render_transaction_log(&mut app_state, f),
+                    ViewMode::Rebalance => render_rebalance(&mut app_state, f),
+                }
+            })?;
+            app_state.should_redraw = false;
+        }
 
-        if event::poll(Duration::from_millis(100))? {
+        if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 handle_key_event(&mut app_state, key.code, key.modifiers).await;
+                app_state.should_redraw = true;
                 
                 if app_state.view_mode == ViewMode::Dashboard && key.code == KeyCode::Char('q') {
                     break;
@@ -539,6 +646,7 @@ fn render_dashboard(app_state: &mut AppState, f: &mut ratatui::Frame) {
             Constraint::Length(3),  // Title
             Constraint::Length(4),  // Portfolio Summary
             Constraint::Min(10),    // Holdings Table
+            Constraint::Length(4),  // Watchlist (NEW)
             Constraint::Length(3),  // Input/Hint
             Constraint::Length(1),  // Status
         ])
@@ -616,13 +724,42 @@ fn render_dashboard(app_state: &mut AppState, f: &mut ratatui::Frame) {
     .block(Block::default().title(" Holdings ").borders(Borders::ALL));
     f.render_widget(table, chunks[2]);
 
+    // Watchlist Table
+    let watchlist_tickers = app_state.config_watcher.config.as_ref()
+        .map(|c| c.tickers.clone())
+        .unwrap_or_default();
+    
+    let wl_rows: Vec<Row> = watchlist_tickers.iter().map(|symbol| {
+        let quote = app_state.quotes.get(symbol);
+        let price_str = quote.map(|q| format!("${:.2}", q.price)).unwrap_or_else(|| "N/A".to_string());
+        let change_str = quote.map(|q| format!("{:+.2}%", q.change_pct)).unwrap_or_else(|| "N/A".to_string());
+        let color = quote.map(|q| if q.change_pct > 0.0 { Color::Green } else if q.change_pct < 0.0 { Color::Red } else { Color::White }).unwrap_or(Color::White);
+
+        Row::new(vec![
+            Cell::from(symbol.clone()),
+            Cell::from(price_str),
+            Cell::from(change_str).style(Style::default().fg(color)),
+        ])
+    }).collect();
+
+    let wl_table = Table::new(
+        wl_rows,
+        [
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+            Constraint::Percentage(34),
+        ],
+    )
+    .block(Block::default().title(" Watchlist (config.json) ").borders(Borders::ALL));
+    f.render_widget(wl_table, chunks[3]);
+
     // Hint bar
     let hint = Paragraph::new(
-        " [P]ortfolio [L]ogs [A]dd [R]efresh [B]alance [D]elete Holdings [Q]uit"
+        " [P]ortfolio [L]ogs [F]ilter [A]dd [R]efresh [B]alance [D]elete Holdings [Q]uit"
     )
     .block(Block::default().borders(Borders::ALL))
     .style(Style::default().fg(Color::DarkGray));
-    f.render_widget(hint, chunks[3]);
+    f.render_widget(hint, chunks[4]);
 
     // Status bar
     let status = if let Some(ref err) = app_state.error_msg {
@@ -631,7 +768,7 @@ fn render_dashboard(app_state: &mut AppState, f: &mut ratatui::Frame) {
         app_state.status_msg.clone()
     };
     let status_bar = Paragraph::new(status).style(Style::default().fg(Color::DarkGray));
-    f.render_widget(status_bar, chunks[4]);
+    f.render_widget(status_bar, chunks[5]);
 }
 
 fn render_add_transaction(app_state: &mut AppState, f: &mut ratatui::Frame) {
@@ -666,6 +803,7 @@ fn render_add_transaction(app_state: &mut AppState, f: &mut ratatui::Frame) {
             TransactionField::Price => i == 2,
             TransactionField::Fee => i == 3,
             TransactionField::Type => i == 4,
+            _ => false,
         };
         
         let style = if is_selected {
@@ -741,6 +879,7 @@ fn render_transaction_log(app_state: &mut AppState, f: &mut ratatui::Frame) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
+            Constraint::Length(3), // Filter box
             Constraint::Min(10),
             Constraint::Length(3),
         ])
@@ -753,14 +892,27 @@ fn render_transaction_log(app_state: &mut AppState, f: &mut ratatui::Frame) {
         .style(Style::default().fg(Color::Cyan));
     f.render_widget(title, chunks[0]);
 
+    // Filter box
+    let filter_text = app_state.input_fields.get("filter").cloned().unwrap_or_default();
+    let filter_style = if app_state.view_mode == ViewMode::TransactionFilter {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let filter_para = Paragraph::new(format!(" Filter by Symbol: {}", filter_text))
+        .block(Block::default().borders(Borders::ALL).title(" [F]ilter "))
+        .style(filter_style);
+    f.render_widget(filter_para, chunks[1]);
+
     // Transaction list
     let header_cells = ["Date", "Type", "Symbol", "Price", "Shares", "Fee", "Total"]
         .iter()
         .map(|h| Cell::from(*h).style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Cyan)));
     let header = Row::new(header_cells).height(1).bottom_margin(1);
 
-    let rows: Vec<Row> = app_state.transactions.iter().enumerate().map(|(i, tx)| {
-        let is_selected = i == app_state.selected_index;
+    let filtered_txs = app_state.get_filtered_transactions();
+    let rows: Vec<Row> = filtered_txs.iter().enumerate().map(|(i, tx)| {
+        let is_selected = i == app_state.selected_index && app_state.view_mode != ViewMode::TransactionFilter;
         let style = if is_selected {
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
         } else {
@@ -799,12 +951,17 @@ fn render_transaction_log(app_state: &mut AppState, f: &mut ratatui::Frame) {
     )
     .header(header)
     .block(Block::default().title(" Transactions ").borders(Borders::ALL));
-    f.render_widget(table, chunks[1]);
+    f.render_widget(table, chunks[2]);
 
     // Hint
-    let hint = Paragraph::new(" [↑/↓] Navigate [D] Delete [Esc] Back ")
+    let hint_text = if app_state.view_mode == ViewMode::TransactionFilter {
+        " [Enter/Esc] Done [Backspace] Clear "
+    } else {
+        " [↑/↓] Navigate [F]ilter [D]elete [Esc] Back "
+    };
+    let hint = Paragraph::new(hint_text)
         .style(Style::default().fg(Color::DarkGray));
-    f.render_widget(hint, chunks[2]);
+    f.render_widget(hint, chunks[3]);
 }
 
 
@@ -860,11 +1017,21 @@ async fn handle_key_event(app_state: &mut AppState, code: KeyCode, _modifiers: K
                     app_state.view_mode = ViewMode::TransactionLog;
                     app_state.selected_index = 0;
                 }
+                KeyCode::Char('f') => {
+                    app_state.view_mode = ViewMode::TransactionFilter;
+                }
                 KeyCode::Char('b') => {
                     app_state.calculate_rebalance();
                 }
                 KeyCode::Char('r') => {
-                    let symbols: Vec<String> = app_state.holdings.iter().map(|h| h.symbol.clone()).collect();
+                    let mut symbols: Vec<String> = app_state.holdings.iter().map(|h| h.symbol.clone()).collect();
+                    if let Some(config) = &app_state.config_watcher.config {
+                        for ticker in &config.tickers {
+                            if !symbols.contains(ticker) {
+                                symbols.push(ticker.clone());
+                            }
+                        }
+                    }
                     if !symbols.is_empty() {
                         app_state.status_msg = " Refreshing prices...".to_string();
                         let (quotes, status) = fetch_all_quotes(&symbols, &mut app_state.cache, &mut app_state.breakers).await;
@@ -896,6 +1063,7 @@ async fn handle_key_event(app_state: &mut AppState, code: KeyCode, _modifiers: K
                         TransactionField::Price => TransactionField::Fee,
                         TransactionField::Fee => TransactionField::Type,
                         TransactionField::Type => TransactionField::Symbol,
+                        _ => TransactionField::Symbol,
                     };
                 }
                 KeyCode::Backspace => {
@@ -905,9 +1073,12 @@ async fn handle_key_event(app_state: &mut AppState, code: KeyCode, _modifiers: K
                         TransactionField::Price => "price",
                         TransactionField::Fee => "fee",
                         TransactionField::Type => "type",
+                        _ => "",
                     };
-                    if let Some(value) = app_state.input_fields.get_mut(field_name) {
-                        value.pop();
+                    if !field_name.is_empty() {
+                        if let Some(value) = app_state.input_fields.get_mut(field_name) {
+                            value.pop();
+                        }
                     }
                 }
                 KeyCode::Char(c) => {
@@ -917,19 +1088,22 @@ async fn handle_key_event(app_state: &mut AppState, code: KeyCode, _modifiers: K
                         TransactionField::Price => "price",
                         TransactionField::Fee => "fee",
                         TransactionField::Type => "type",
+                        _ => "",
                     };
-                    if let Some(value) = app_state.input_fields.get_mut(field_name) {
-                        // Toggle type field
-                        if field_name == "type" {
-                            *value = if c == 'b' || c == 'B' {
-                                "Buy".to_string()
-                            } else if c == 's' || c == 'S' {
-                                "Sell".to_string()
+                    if !field_name.is_empty() {
+                        if let Some(value) = app_state.input_fields.get_mut(field_name) {
+                            // Toggle type field
+                            if field_name == "type" {
+                                *value = if c == 'b' || c == 'B' {
+                                    "Buy".to_string()
+                                } else if c == 's' || c == 'S' {
+                                    "Sell".to_string()
+                                } else {
+                                    value.clone()
+                                };
                             } else {
-                                value.clone()
-                            };
-                        } else {
-                            value.push(c);
+                                value.push(c);
+                            }
                         }
                     }
                 }
@@ -982,12 +1156,46 @@ async fn handle_key_event(app_state: &mut AppState, code: KeyCode, _modifiers: K
                     }
                 }
                 KeyCode::Down => {
-                    if app_state.selected_index < app_state.transactions.len().saturating_sub(1) {
+                    let filtered_len = app_state.get_filtered_transactions().len();
+                    if app_state.selected_index < filtered_len.saturating_sub(1) {
                         app_state.selected_index += 1;
                     }
                 }
+                KeyCode::Char('f') | KeyCode::Char('F') => {
+                    app_state.view_mode = ViewMode::TransactionFilter;
+                }
                 KeyCode::Char('d') | KeyCode::Char('D') => {
-                    app_state.delete_selected_transaction();
+                    // Adjust to delete from filtered list
+                    let filtered = app_state.get_filtered_transactions();
+                    if app_state.selected_index < filtered.len() {
+                        let tx = &filtered[app_state.selected_index];
+                        if let Err(e) = app_state.db.delete_transaction(&tx.id) {
+                            app_state.error_msg = Some(format!("Failed to delete: {}", e));
+                        } else {
+                            app_state.status_msg = format!(" Deleted transaction: {}", tx.symbol);
+                            app_state.refresh_holdings();
+                            app_state.refresh_transactions();
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        ViewMode::TransactionFilter => {
+            match code {
+                KeyCode::Esc | KeyCode::Enter => {
+                    app_state.view_mode = ViewMode::TransactionLog;
+                    app_state.selected_index = 0;
+                }
+                KeyCode::Backspace => {
+                    if let Some(value) = app_state.input_fields.get_mut("filter") {
+                        value.pop();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let Some(value) = app_state.input_fields.get_mut("filter") {
+                        value.push(c);
+                    }
                 }
                 _ => {}
             }
